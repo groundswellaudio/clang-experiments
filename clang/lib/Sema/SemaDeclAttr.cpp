@@ -8317,6 +8317,13 @@ static bool MustDelayAttributeArguments(const ParsedAttr &AL) {
   return false;
 }
 
+static void handleDeepConstAttr(Sema& S, Decl* D, const ParsedAttr& AL)
+{
+  // is the safe cast needed? probably not
+  if (auto R = dyn_cast<CXXRecordDecl>(D))
+    R->setDeclaredDeepConst(true);
+}
+
 /// ProcessDeclAttribute - Apply the specific attribute to the specified decl if
 /// the attribute applies to decls.  If the attribute is a type attribute, just
 /// silently ignore it if a GNU attribute.
@@ -8438,6 +8445,9 @@ ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D, const ParsedAttr &AL,
     // that do not list any subjects.
     S.Diag(AL.getLoc(), diag::err_attribute_invalid_on_decl)
         << AL << D->getLocation();
+    break;
+  case ParsedAttr::AT_DeepConst: 
+    handleDeepConstAttr(S, D, AL);
     break;
   case ParsedAttr::AT_Interrupt:
     handleInterruptAttr(S, D, AL);

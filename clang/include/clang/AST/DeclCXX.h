@@ -679,6 +679,22 @@ public:
   bool hasFriends() const {
     return data().FirstFriend.isValid();
   }
+  
+  void setDeclaredDeepConst(bool v) {
+  	data().DeclaredDeepConst = v;
+  }
+  
+  bool isDeclaredDeepConst() const {
+    return data().DeclaredDeepConst;
+  }
+  
+  void setDeepConst(bool val) {
+    data().IsDeepConst = val;
+  }
+  
+  bool isDeepConst() const {
+    return data().IsDeepConst;
+  }
 
   /// \c true if a defaulted copy constructor for this class would be
   /// deleted.

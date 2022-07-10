@@ -4036,3 +4036,10 @@ def NoRandomizeLayout : InheritableAttr {
   let LangOpts = [COnly];
 }
 def : MutualExclusions<[RandomizeLayout, NoRandomizeLayout]>;
+
+def DeepConst : InheritableAttr {
+  let Spellings = [Clang<"deep_const">];
+  let Subjects = SubjectList<[Struct, CXXRecord]>;
+  let MeaningfulToClassTemplateDefinition = 1;
+  let Documentation = [InternalOnly];
+}

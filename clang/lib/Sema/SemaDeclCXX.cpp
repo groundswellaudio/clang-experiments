@@ -1890,6 +1890,7 @@ static bool CheckConstexprDeclStmt(Sema &SemaRef, const FunctionDecl *Dcl,
       const auto *VD = cast<VarDecl>(DclIt);
       if (VD->isThisDeclarationADefinition()) {
         if (VD->isStaticLocal()) {
+          /* deep_const */ 
           if (Kind == Sema::CheckConstexprKind::Diagnose) {
             SemaRef.Diag(VD->getLocation(),
                          SemaRef.getLangOpts().CPlusPlus2b

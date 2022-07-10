@@ -32,6 +32,9 @@
 #error define FIELD before including this file
 #endif
 
+FIELD(DeclaredDeepConst, 1, NO_MERGE)
+FIELD(IsDeepConst, 1, NO_MERGE)
+
 /// True if this class has any user-declared constructors.
 FIELD(UserDeclaredConstructor, 1, NO_MERGE)
 

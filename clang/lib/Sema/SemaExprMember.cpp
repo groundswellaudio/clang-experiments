@@ -1796,6 +1796,27 @@ void Sema::CheckMemberAccessOfNoDeref(const MemberExpr *E) {
   }
 }
 
+static QualType makeDeepConstType(QualType qualTy, ASTContext& ctx)
+{
+  const Type* ty = qualTy.getTypePtr();
+  if (auto p = dyn_cast<PointerType>(ty))
+  {
+    auto r = makeDeepConstType(p->getPointeeType(), ctx);
+    return ctx.getPointerType(r).withConst();
+  }
+  if (auto p = dyn_cast<LValueReferenceType>(ty))
+  {
+    auto r = makeDeepConstType(p->getPointeeType(), ctx);
+    return ctx.getLValueReferenceType(r).withConst();
+  }
+  if (auto p = dyn_cast<RValueReferenceType>(ty))
+  {
+    auto r = makeDeepConstType(p->getPointeeType(), ctx);
+    return ctx.getRValueReferenceType(r).withConst();
+  }
+  return qualTy.withConst();
+}
+
 ExprResult
 Sema::BuildFieldReferenceExpr(Expr *BaseExpr, bool IsArrow,
                               SourceLocation OpLoc, const CXXScopeSpec &SS,
@@ -1817,12 +1838,14 @@ Sema::BuildFieldReferenceExpr(Expr *BaseExpr, bool IsArrow,
     OK = OK_BitField;
 
   // Figure out the type of the member; see C99 6.5.2.3p3, C++ [expr.ref]
+  
+  QualType BaseType = BaseExpr->getType();
   QualType MemberType = Field->getType();
+  
   if (const ReferenceType *Ref = MemberType->getAs<ReferenceType>()) {
     MemberType = Ref->getPointeeType();
     VK = VK_LValue;
   } else {
-    QualType BaseType = BaseExpr->getType();
     if (IsArrow) BaseType = BaseType->castAs<PointerType>()->getPointeeType();
 
     Qualifiers BaseQuals = BaseType.getQualifiers();
@@ -1851,6 +1874,15 @@ Sema::BuildFieldReferenceExpr(Expr *BaseExpr, bool IsArrow,
       MemberType =
           Context.getAttributedType(attr::NoDeref, MemberType, MemberType);
   }
+  
+  if (BaseType.isConstQualified()) 
+    if (auto RD = BaseType->getAsCXXRecordDecl(); RD && RD->isDeclaredDeepConst())
+    {
+      auto T = makeDeepConstType(MemberType, getASTContext());
+      llvm::outs() << "changed " << MemberType.getAsString() << "to " << T.getAsString() << "\n";
+      MemberType = makeDeepConstType(MemberType, getASTContext());
+    }
+
 
   auto *CurMethod = dyn_cast<CXXMethodDecl>(CurContext);
   if (!(CurMethod && CurMethod->isDefaulted()))

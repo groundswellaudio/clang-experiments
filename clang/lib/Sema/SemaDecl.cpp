@@ -8471,7 +8471,8 @@ void Sema::CheckVariableDeclarationType(VarDecl *NewVD) {
     NewVD->setInvalidDecl();
     return;
   }
-
+  
+  // deep_const 
   if (NewVD->isConstexpr() && !T->isDependentType() &&
       RequireLiteralType(NewVD->getLocation(), T,
                          diag::err_constexpr_var_non_literal)) {
@@ -16877,6 +16878,9 @@ CreateNewDecl:
     // the #pragma tokens are effectively skipped over during the
     // parsing of the struct).
     if (TUK == TUK_Definition && (!SkipBody || !SkipBody->ShouldSkip)) {
+    
+    	// deep_const 
+    	
       AddAlignmentAttributesForRecord(RD);
       AddMsStructLayoutForRecord(RD);
     }
@@ -17845,6 +17849,48 @@ void ComputeSelectedDestructor(Sema &S, CXXRecordDecl *Record) {
     Record->addedSelectedDestructor(dyn_cast<CXXDestructorDecl>(OCS.begin()->Function));
   }
 }
+
+// A type T is deep_const if a const T cannot produce a non-const 
+// pointer or reference to any piece of memory
+// A type T is deep_const if it is : 
+//  - a fundamental type
+//  - a record type annotated with deep_const
+//  - a record type for which every fields are deep_const
+//  - a pointer type of the form (const G*) where G is deep_const
+//  - ditto for reference type
+//  - an array-type whose element type is deep_const
+    
+bool isDeepConst(const Type* ty)
+{
+  if (ty->isFundamentalType())
+    return true;
+  if (ty->isPointerType() || ty->isReferenceType())
+  {
+    auto p = ty->getPointeeType();
+    return p.isConstQualified() && isDeepConst(p.getTypePtr());
+  }
+  if (ty->isArrayType())
+  {
+    return isDeepConst(ty->getArrayElementTypeNoTypeQual());
+  }
+  if (auto d = ty->getAsCXXRecordDecl())
+  {
+    return d->isDeepConst();
+  }
+  return false;
+}
+
+// The type of a field is deep-const-coercible if : 
+//  - it is deep_const
+//  - it's of the form T* or T&, where T is deep-const-coercible
+
+bool isDeepConstCoercible(QualType ty)
+{
+  if (ty->isPointerType() || ty->isReferenceType())
+    return isDeepConstCoercible(ty->getPointeeType());
+  return isDeepConst(ty.getTypePtr());
+}
+
 } // namespace
 
 void Sema::ActOnFields(Scope *S, SourceLocation RecLoc, Decl *EnclosingDecl,
@@ -17872,10 +17918,19 @@ void Sema::ActOnFields(Scope *S, SourceLocation RecLoc, Decl *EnclosingDecl,
 
   RecordDecl *Record = dyn_cast<RecordDecl>(EnclosingDecl);
   CXXRecordDecl *CXXRecord = dyn_cast<CXXRecordDecl>(EnclosingDecl);
-
+  
+  if (CXXRecord)
+  {
+    CXXRecord->setDeepConst(true);
+    if (CXXRecord->isDeclaredDeepConst())
+      llvm::outs() << "Class " << CXXRecord->getName() << " is declared deep const.";
+    else 
+      llvm::outs() << "Class " << CXXRecord->getName() << " is not declared deep const.";
+  }
+  
   if (CXXRecord && !CXXRecord->isDependentType())
     ComputeSelectedDestructor(*this, CXXRecord);
-
+  
   // Start counting up the number of named members; make sure to include
   // members of anonymous structs and unions in the total.
   unsigned NumNamedMembers = 0;
@@ -17896,7 +17951,21 @@ void Sema::ActOnFields(Scope *S, SourceLocation RecLoc, Decl *EnclosingDecl,
 
     // Get the type for the field.
     const Type *FDTy = FD->getType().getTypePtr();
-
+    
+    if (CXXRecord)
+    {
+      if (CXXRecord->isDeclaredDeepConst())
+      {
+         bool ok = isDeepConstCoercible(FD->getType());
+         FD->getType().dump(); llvm::outs() << " is deep-const-coercible.\n";
+         CXXRecord->setDeepConst(CXXRecord->isDeepConst() && ok);
+      }
+      else 
+      {
+        CXXRecord->setDeepConst(CXXRecord->isDeepConst() && isDeepConst(FDTy));
+      }
+    }
+    
     if (!FD->isAnonymousStructOrUnion()) {
       // Remember all fields written by the user.
       RecFields.push_back(FD);
@@ -17921,6 +17990,7 @@ void Sema::ActOnFields(Scope *S, SourceLocation RecLoc, Decl *EnclosingDecl,
     //   array.
     bool IsLastField = (i + 1 == Fields.end());
     if (FDTy->isFunctionType()) {
+	  
       // Field declared as a function.
       Diag(FD->getLocation(), diag::err_field_declared_as_function)
         << FD->getDeclName();
