@@ -15637,8 +15637,14 @@ void Sema::FinalizeVarWithDestructor(VarDecl *VD, const RecordType *Record) {
 
   if (Destructor->isTrivial()) return;
 
+  // deep-const NOTES : the below rule make things a bit difficult 
+  // for permanent allocations
+  // and i don't really see the point of it anyway, so commented out it goes
+  
   // If the destructor is constexpr, check whether the variable has constant
   // destruction now.
+  
+  /* 
   if (Destructor->isConstexpr()) {
     bool HasConstantInit = false;
     if (VD->getInit() && !VD->getInit()->isValueDependent())
@@ -15651,7 +15657,7 @@ void Sema::FinalizeVarWithDestructor(VarDecl *VD, const RecordType *Record) {
       for (unsigned I = 0, N = Notes.size(); I != N; ++I)
         Diag(Notes[I].first, Notes[I].second);
     }
-  }
+  } */ 
 
   if (!VD->hasGlobalStorage()) return;
 

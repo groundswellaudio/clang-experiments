@@ -39,6 +39,7 @@ template <typename T> class BasicReaderBase;
   class Type;
   class ValueDecl;
   class QualType;
+  class APValueWithHeap;
 
 /// Symbolic representation of typeid(T) for some type T.
 class TypeInfoLValue {
@@ -68,7 +69,7 @@ class DynamicAllocLValue {
 public:
   DynamicAllocLValue() : Index(0) {}
   explicit DynamicAllocLValue(unsigned Index) : Index(Index + 1) {}
-  unsigned getIndex() { return Index - 1; }
+  unsigned getIndex() const { return Index - 1; }
 
   explicit operator bool() const { return Index != 0; }
 
@@ -116,6 +117,7 @@ template<> struct PointerLikeTypeTraits<clang::DynamicAllocLValue> {
 }
 
 namespace clang {
+
 /// APValue - This class implements a discriminated union of [uninitialized]
 /// [APSInt] [APFloat], [Complex APSInt] [Complex APFloat], [Expr + Offset],
 /// [Vector: N * APValue], [Array: N * APValue]
@@ -140,7 +142,8 @@ public:
     Struct,
     Union,
     MemberPointer,
-    AddrLabelDiff
+    AddrLabelDiff, 
+    ValueWithHeap
   };
 
   class LValueBase {
@@ -355,6 +358,9 @@ public:
       : Kind(None) {
     MakeAddrLabelDiff(); setAddrLabelDiff(LHSExpr, RHSExpr);
   }
+  
+  APValue(APValueWithHeap&& value);
+  
   static APValue IndeterminateValue() {
     APValue Result;
     Result.Kind = Indeterminate;
@@ -472,6 +478,14 @@ public:
   }
   const APFloat &getComplexFloatImag() const {
     return const_cast<APValue*>(this)->getComplexFloatImag();
+  }
+  
+  APValueWithHeap& getValueWithHeap() {
+    return *((APValueWithHeap*)(char*)&Data);
+  }
+  
+  const APValueWithHeap& getValueWithHeap() const {
+    return const_cast<APValue*>(this)->getValueWithHeap();
   }
 
   const LValueBase getLValueBase() const;

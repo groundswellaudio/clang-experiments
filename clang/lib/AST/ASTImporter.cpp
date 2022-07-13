@@ -9632,6 +9632,9 @@ ASTNodeImporter::ImportAPValue(const APValue &FromValue) {
   case APValue::ComplexFloat:
     Result = FromValue;
     break;
+  case APValue::ValueWithHeap:
+    assert(false && "todo");
+    break;
   case APValue::Vector: {
     Result.MakeVector();
     MutableArrayRef<APValue> Elts =

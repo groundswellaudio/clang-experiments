@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/AST/APValue.h"
+#include "clang/AST/APValueWithHeap.h"
 #include "Linkage.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/CharUnits.h"
@@ -314,6 +315,13 @@ APValue::APValue(const APValue &RHS) : Kind(None) {
   case Indeterminate:
     Kind = RHS.getKind();
     break;
+  case ValueWithHeap:
+  {
+    const auto& V = RHS.getValueWithHeap();
+    new ((void*)&Data) APValueWithHeap(V);
+    Kind = ValueWithHeap;
+    break;
+  }
   case Int:
     MakeInt();
     setInt(RHS.getInt());
@@ -379,6 +387,11 @@ APValue::APValue(const APValue &RHS) : Kind(None) {
   }
 }
 
+APValue::APValue(APValueWithHeap&& value) : Kind(ValueWithHeap)
+{
+  new ((void*)&Data) APValueWithHeap{ decltype(value)(value) };
+}
+
 APValue::APValue(APValue &&RHS) : Kind(RHS.Kind), Data(RHS.Data) {
   RHS.Kind = None;
 }
@@ -423,6 +436,8 @@ void APValue::DestroyDataAndMakeUninit() {
     ((MemberPointerData *)(char *)&Data)->~MemberPointerData();
   else if (Kind == AddrLabelDiff)
     ((AddrLabelDiffData *)(char *)&Data)->~AddrLabelDiffData();
+  else if (Kind == ValueWithHeap)
+    ((APValueWithHeap*)(char*)&Data)->~APValueWithHeap();
   Kind = None;
 }
 
@@ -432,6 +447,7 @@ bool APValue::needsCleanup() const {
   case Indeterminate:
   case AddrLabelDiff:
     return false;
+  case ValueWithHeap:
   case Struct:
   case Union:
   case Array:
@@ -486,7 +502,16 @@ void APValue::Profile(llvm::FoldingSetNodeID &ID) const {
   case None:
   case Indeterminate:
     return;
-
+  
+  case ValueWithHeap: 
+  {
+    auto& V = getValueWithHeap();
+    V.value().Profile(ID);
+    for (auto& C : V.heap())
+       C.second.Value.Profile(ID);
+    return;
+  }
+  
   case AddrLabelDiff:
     ID.AddPointer(getAddrLabelDiffLHS()->getLabel()->getCanonicalDecl());
     ID.AddPointer(getAddrLabelDiffRHS()->getLabel()->getCanonicalDecl());
@@ -707,6 +732,11 @@ void APValue::printPretty(raw_ostream &Out, const PrintingPolicy &Policy,
   case APValue::Indeterminate:
     Out << "<uninitialized>";
     return;
+  case APValue::ValueWithHeap:
+    Out << "ValueWithHeap : ";
+    getValueWithHeap().value().printPretty(Out, Policy, Ty, Ctx);
+    break;
+    
   case APValue::Int:
     if (Ty->isBooleanType())
       Out << (getInt().getBoolValue() ? "true" : "false");
@@ -1123,6 +1153,9 @@ LinkageInfo LinkageComputer::getLVForValue(const APValue &V,
   case APValue::ComplexFloat:
   case APValue::Vector:
     break;
+  
+  case APValue::ValueWithHeap:
+    return getLVForValue( V.getValueWithHeap().value(), computation );
 
   case APValue::AddrLabelDiff:
     // Even for an inline function, it's not reasonable to treat a difference

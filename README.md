@@ -1,3 +1,71 @@
+This is a fork of Clang implementing *permanents constexpr allocations*. 
+
+Example : 
+
+```
+template <class T>
+struct [[clang::deep_const]] Vec
+{
+	constexpr Vec(int sz, T val)
+	{
+		data = new T[sz];
+		size = sz;
+		for (int k = 0; k < sz; ++k)
+			data[k] = val;
+	}
+	
+	constexpr Vec(Vec&& o) noexcept 
+	{
+		data = o.data;
+		o.data = nullptr;
+		size = o.size;
+	}
+
+	constexpr auto& operator[](int i) const { return data[i]; }
+	constexpr auto& operator[](int i)       { return data[i]; }
+
+	constexpr ~Vec()
+	{
+		if (data)
+			delete[] data;
+	}
+
+	T* data;
+	int size;
+};
+
+constexpr Vec<int> make_thing()
+{
+	Vec<int> res(4, 0);
+	res[0] = 1; res[1] = 2; res[2] = 4; res[3] = 8;
+	return res;
+}
+
+static constexpr auto V = make_thing();
+
+#include <cassert>
+
+int main()
+{
+	auto Z = V.data;
+	static_assert( std::is_same_v<decltype(Z), const int*> ); // deep immutability
+
+	int val = 1;
+	for (int k = 0; k < 4; ++k, val *= 2)
+		assert( val == V[k] );
+}
+
+```
+
+Explanation : the main issue with `constexpr` containers is that the language have to make sure
+that no `constexpr` allocated memory can be accessed through a non-const pointer. 
+The `deep_const` attribute, when applied to a struct, will insert cast to guarantee deep-immutability 
+for every fields, or will issue an error if it's not possible.
+
+Deep immutability is either deduced or asserted via the above attribute. 
+
+----------------------------------------------------------------
+
 # The LLVM Compiler Infrastructure
 
 This directory and its sub-directories contain the source code for LLVM,

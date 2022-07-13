@@ -16,6 +16,7 @@
 
 #include "CodeGenFunction.h"
 #include "CodeGenModule.h"
+#include "llvm/ADT/DenseMap.h"
 
 namespace clang {
 namespace CodeGen {
@@ -24,7 +25,8 @@ class ConstantEmitter {
 public:
   CodeGenModule &CGM;
   CodeGenFunction *const CGF;
-
+  llvm::DenseMap<unsigned, llvm::GlobalVariable*> AllocMap;
+  
 private:
   bool Abstract = false;
 
@@ -46,7 +48,7 @@ private:
 
   llvm::SmallVector<std::pair<llvm::Constant *, llvm::GlobalVariable*>, 4>
     PlaceholderAddresses;
-
+  
 public:
   ConstantEmitter(CodeGenModule &CGM, CodeGenFunction *CGF = nullptr)
     : CGM(CGM), CGF(CGF) {}

@@ -8245,6 +8245,40 @@ static bool checkForConflictWithNonVisibleExternC(Sema &S, const T *ND,
   return false;
 }
 
+// A type T is deep_const if a const T cannot produce a non-const 
+// pointer or reference to any piece of memory
+// A type T is deep_const if it is : 
+//  - a fundamental type
+//  - a record type annotated with deep_const
+//  - a record type for which every fields are deep_const
+//  - a pointer type of the form (const G*) where G is deep_const
+//  - ditto for reference type
+//  - an array-type whose element type is deep_const
+
+static bool isDeepConst(const Type* ty)
+{
+  if (ty->isFundamentalType())
+    return true;
+  if (ty->isPointerType() || ty->isReferenceType())
+  {
+    auto p = ty->getPointeeType();
+    return p.isConstQualified() && isDeepConst(&*p);
+  }
+  if (ty->isArrayType())
+  {
+    return isDeepConst(ty->getArrayElementTypeNoTypeQual());
+  }
+  if (ty->isRecordType())
+  {
+    auto RD = ty->getAsRecordDecl();
+    assert(RD);
+    auto d = dyn_cast<CXXRecordDecl>(ty->getAsRecordDecl());
+    if (d && d->hasDefinition())
+      return d->isDeepConst();
+  }
+  return false;
+}
+
 void Sema::CheckVariableDeclarationType(VarDecl *NewVD) {
   // If the decl is already known invalid, don't check it.
   if (NewVD->isInvalidDecl())
@@ -8473,9 +8507,11 @@ void Sema::CheckVariableDeclarationType(VarDecl *NewVD) {
   }
   
   // deep_const 
-  if (NewVD->isConstexpr() && !T->isDependentType() &&
+  if (NewVD->isConstexpr() && !T->isDependentType()
+      && !isDeepConst(&*T) &&
       RequireLiteralType(NewVD->getLocation(), T,
-                         diag::err_constexpr_var_non_literal)) {
+                         diag::err_constexpr_var_non_literal)) 
+  {
     NewVD->setInvalidDecl();
     return;
   }
@@ -16878,9 +16914,6 @@ CreateNewDecl:
     // the #pragma tokens are effectively skipped over during the
     // parsing of the struct).
     if (TUK == TUK_Definition && (!SkipBody || !SkipBody->ShouldSkip)) {
-    
-    	// deep_const 
-    	
       AddAlignmentAttributesForRecord(RD);
       AddMsStructLayoutForRecord(RD);
     }
@@ -17850,43 +17883,13 @@ void ComputeSelectedDestructor(Sema &S, CXXRecordDecl *Record) {
   }
 }
 
-// A type T is deep_const if a const T cannot produce a non-const 
-// pointer or reference to any piece of memory
-// A type T is deep_const if it is : 
-//  - a fundamental type
-//  - a record type annotated with deep_const
-//  - a record type for which every fields are deep_const
-//  - a pointer type of the form (const G*) where G is deep_const
-//  - ditto for reference type
-//  - an array-type whose element type is deep_const
-    
-bool isDeepConst(const Type* ty)
-{
-  if (ty->isFundamentalType())
-    return true;
-  if (ty->isPointerType() || ty->isReferenceType())
-  {
-    auto p = ty->getPointeeType();
-    return p.isConstQualified() && isDeepConst(p.getTypePtr());
-  }
-  if (ty->isArrayType())
-  {
-    return isDeepConst(ty->getArrayElementTypeNoTypeQual());
-  }
-  if (auto d = ty->getAsCXXRecordDecl())
-  {
-    return d->isDeepConst();
-  }
-  return false;
-}
-
 // The type of a field is deep-const-coercible if : 
 //  - it is deep_const
 //  - it's of the form T* or T&, where T is deep-const-coercible
 
-bool isDeepConstCoercible(QualType ty)
+static bool isDeepConstCoercible(QualType ty)
 {
-  if (ty->isPointerType() || ty->isReferenceType())
+  if (ty->isPointerType() || ty->isReferenceType())
     return isDeepConstCoercible(ty->getPointeeType());
   return isDeepConst(ty.getTypePtr());
 }
@@ -17922,10 +17925,6 @@ void Sema::ActOnFields(Scope *S, SourceLocation RecLoc, Decl *EnclosingDecl,
   if (CXXRecord)
   {
     CXXRecord->setDeepConst(true);
-    if (CXXRecord->isDeclaredDeepConst())
-      llvm::outs() << "Class " << CXXRecord->getName() << " is declared deep const.";
-    else 
-      llvm::outs() << "Class " << CXXRecord->getName() << " is not declared deep const.";
   }
   
   if (CXXRecord && !CXXRecord->isDependentType())
@@ -17957,7 +17956,6 @@ void Sema::ActOnFields(Scope *S, SourceLocation RecLoc, Decl *EnclosingDecl,
       if (CXXRecord->isDeclaredDeepConst())
       {
          bool ok = isDeepConstCoercible(FD->getType());
-         FD->getType().dump(); llvm::outs() << " is deep-const-coercible.\n";
          CXXRecord->setDeepConst(CXXRecord->isDeepConst() && ok);
       }
       else 

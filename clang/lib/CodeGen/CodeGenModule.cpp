@@ -4592,7 +4592,7 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D,
   llvm::TrackingVH<llvm::Constant> Init;
   bool NeedsGlobalCtor = false;
   bool NeedsGlobalDtor =
-      D->needsDestruction(getContext()) == QualType::DK_cxx_destructor;
+      !D->isConstexpr() && D->needsDestruction(getContext()) == QualType::DK_cxx_destructor;
 
   const VarDecl *InitDecl;
   const Expr *InitExpr = D->getAnyInitializer(InitDecl);

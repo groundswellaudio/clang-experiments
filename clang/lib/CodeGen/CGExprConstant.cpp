@@ -18,6 +18,7 @@
 #include "ConstantEmitter.h"
 #include "TargetInfo.h"
 #include "clang/AST/APValue.h"
+#include "clang/AST/APValueWithHeap.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/RecordLayout.h"
@@ -29,8 +30,12 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
+#include "llvm/ADT/DenseMap.h"
+
 using namespace clang;
 using namespace CodeGen;
+
+#define PRINT_DEBUG llvm::outs() << __PRETTY_FUNCTION__ << ' ' << __LINE__ << '\n'
 
 //===----------------------------------------------------------------------===//
 //                            ConstantAggregateBuilder
@@ -559,7 +564,7 @@ class ConstStructBuilder {
   ConstantEmitter &Emitter;
   ConstantAggregateBuilder &Builder;
   CharUnits StartOffset;
-
+  
 public:
   static llvm::Constant *BuildStruct(ConstantEmitter &Emitter,
                                      InitListExpr *ILE, QualType StructTy);
@@ -1639,6 +1644,58 @@ static QualType getNonMemoryType(CodeGenModule &CGM, QualType type) {
   return type;
 }
 
+static QualType getValueType(ASTContext& ctx, const APValue& Val, QualType ElemTy)
+{
+  if (not Val.isArray())
+    return ElemTy;
+  llvm::APInt Size (32, Val.getArraySize());
+  return ctx.getConstantArrayType(ElemTy, Size, nullptr, ArrayType::Normal, 0);
+}
+
+static void emitForVarInitWithHeap(ConstantEmitter& Self, APValueWithHeap& Val)
+{
+  llvm::SmallVector<llvm::GlobalVariable*, 8> GVS;
+  
+  Self.AllocMap.clear();
+  
+  auto getHeapBlockType = [&] (auto& node) {
+     auto ElemTy = cast<CXXNewExpr>(node.second.AllocExpr)->getAllocatedType();
+     return getValueType(Self.CGM.getContext(), node.second.Value, ElemTy);
+  };
+  
+  for (auto& C : Val.heap())
+  {
+    PRINT_DEBUG;
+    auto HeapChunkTy = getHeapBlockType(C);
+        
+    llvm::GlobalVariable *Placeholder = new llvm::GlobalVariable
+    (
+      Self.CGM.getModule(), 
+      Self.CGM.getTypes().ConvertType(HeapChunkTy), 
+      /*IsConstant*/ true, 
+      llvm::GlobalValue::PrivateLinkage,
+      /*Initializer*/ nullptr, 
+      /*Name*/ "", 
+      /*InsertBefore*/ nullptr, 
+      llvm::GlobalValue::NotThreadLocal, /*AddrSpace*/ 0
+    );
+    
+    Self.AllocMap.try_emplace( C.first.getIndex(), Placeholder );
+    GVS.push_back(Placeholder);
+  }
+      
+  auto it   = Val.heap().begin();
+  auto itGV = GVS.begin();
+        
+  for (; it != Val.heap().end() && itGV != GVS.end(); ++it, ++itGV)
+  {
+    auto Ty = getHeapBlockType(*it);
+    auto Cst = Self.tryEmitPrivate(it->second.Value, Ty);
+    auto& GV = **itGV;
+    GV.setInitializer(Cst);
+  }
+}
+      
 llvm::Constant *ConstantEmitter::tryEmitPrivateForVarInit(const VarDecl &D) {
   // Make a quick check if variable can be default NULL initialized
   // and avoid going through rest of code which may do, for c++11,
@@ -1659,7 +1716,16 @@ llvm::Constant *ConstantEmitter::tryEmitPrivateForVarInit(const VarDecl &D) {
 
   // Try to emit the initializer.  Note that this can allow some things that
   // are not allowed by tryEmitPrivateForMemory alone.
-  if (auto value = D.evaluateValue()) {
+  if (auto value = D.evaluateValue()) 
+  {
+    // make the transient allocation permanent
+    if (value->getKind() == APValue::ValueWithHeap)
+    {
+      auto& VWH = value->getValueWithHeap();
+      emitForVarInitWithHeap(*this, VWH);
+      value = &VWH.value();
+    }
+    
     return tryEmitPrivateForMemory(*value, destType);
   }
 
@@ -1956,6 +2022,15 @@ ConstantLValueEmitter::tryEmitBase(const APValue::LValueBase &base) {
       TypeInfo = llvm::ConstantExpr::getBitCast(TypeInfo, StdTypeInfoPtrTy);
     return TypeInfo;
   }
+  
+  if (base.is<DynamicAllocLValue>())
+  {
+    auto P = base.dyn_cast<DynamicAllocLValue>();
+    // get the corresponding address from the heap map
+    auto C = Emitter.AllocMap.find(P.getIndex());
+    assert( C != Emitter.AllocMap.end() );
+    return C->second;
+  }
 
   // Otherwise, it must be an expression.
   return Visit(base.get<const Expr*>());
@@ -2075,6 +2150,10 @@ llvm::Constant *ConstantEmitter::tryEmitPrivate(const APValue &Value,
   case APValue::Indeterminate:
     // Out-of-lifetime and indeterminate values can be modeled as 'undef'.
     return llvm::UndefValue::get(CGM.getTypes().ConvertType(DestType));
+  case APValue::ValueWithHeap : 
+    assert(false);
+    break;
+  
   case APValue::LValue:
     return ConstantLValueEmitter(*this, Value, DestType).tryEmit();
   case APValue::Int:
@@ -2156,6 +2235,9 @@ llvm::Constant *ConstantEmitter::tryEmitPrivate(const APValue &Value,
     return ConstStructBuilder::BuildStruct(*this, Value, DestType);
   case APValue::Array: {
     const ArrayType *ArrayTy = CGM.getContext().getAsArrayType(DestType);
+    
+    assert(ArrayTy);
+    
     unsigned NumElements = Value.getArraySize();
     unsigned NumInitElts = Value.getArrayInitializedElts();
 
@@ -2167,14 +2249,14 @@ llvm::Constant *ConstantEmitter::tryEmitPrivate(const APValue &Value,
       if (!Filler)
         return nullptr;
     }
-
     // Emit initializer elements.
     SmallVector<llvm::Constant*, 16> Elts;
+    
     if (Filler && Filler->isNullValue())
       Elts.reserve(NumInitElts + 1);
     else
       Elts.reserve(NumElements);
-
+	
     llvm::Type *CommonElementType = nullptr;
     for (unsigned I = 0; I < NumInitElts; ++I) {
       llvm::Constant *C = tryEmitPrivateForMemory(
@@ -2187,7 +2269,7 @@ llvm::Constant *ConstantEmitter::tryEmitPrivate(const APValue &Value,
         CommonElementType = nullptr;
       Elts.push_back(C);
     }
-
+	
     llvm::ArrayType *Desired =
         cast<llvm::ArrayType>(CGM.getTypes().ConvertType(DestType));
     return EmitArrayConstant(CGM, Desired, CommonElementType, NumElements, Elts,

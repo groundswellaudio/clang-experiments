@@ -1112,7 +1112,26 @@ static llvm::Constant *constWithPadding(CodeGenModule &CGM, IsPattern isPattern,
 
 Address CodeGenModule::createUnnamedGlobalFrom(const VarDecl &D,
                                                llvm::Constant *Constant,
-                                               CharUnits Align) {
+                                               CharUnits Align) 
+{
+  
+  static constexpr auto createNamedGlobal = 
+  [](CodeGenModule& self, const std::string& Name, llvm::Constant* Cst, CharUnits Align)
+  {
+    auto *Ty = Cst->getType();
+    bool isConstant = true;
+    llvm::GlobalVariable *InsertBefore = nullptr;
+    unsigned AS = self.getContext().getTargetAddressSpace(self.GetGlobalConstantAddressSpace());
+    llvm::GlobalVariable *GV = new llvm::GlobalVariable
+    (
+      self.getModule(), Ty, isConstant, llvm::GlobalValue::PrivateLinkage,
+      Cst, Name, InsertBefore, llvm::GlobalValue::NotThreadLocal, AS
+    );
+    GV->setAlignment(Align.getAsAlign());
+    GV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    return GV;
+  };
+  
   auto FunctionName = [&](const DeclContext *DC) -> std::string {
     if (const auto *FD = dyn_cast<FunctionDecl>(DC)) {
       if (const auto *CC = dyn_cast<CXXConstructorDecl>(FD))
@@ -1134,26 +1153,23 @@ Address CodeGenModule::createUnnamedGlobalFrom(const VarDecl &D,
   // Form a simple per-variable cache of these values in case we find we
   // want to reuse them.
   llvm::GlobalVariable *&CacheEntry = InitializerConstants[&D];
-  if (!CacheEntry || CacheEntry->getInitializer() != Constant) {
-    auto *Ty = Constant->getType();
-    bool isConstant = true;
-    llvm::GlobalVariable *InsertBefore = nullptr;
-    unsigned AS =
-        getContext().getTargetAddressSpace(GetGlobalConstantAddressSpace());
-    std::string Name;
-    if (D.hasGlobalStorage())
-      Name = getMangledName(&D).str() + ".const";
-    else if (const DeclContext *DC = D.getParentFunctionOrMethod())
-      Name = ("__const." + FunctionName(DC) + "." + D.getName()).str();
-    else
-      llvm_unreachable("local variable has no parent function or method");
-    llvm::GlobalVariable *GV = new llvm::GlobalVariable(
-        getModule(), Ty, isConstant, llvm::GlobalValue::PrivateLinkage,
-        Constant, Name, InsertBefore, llvm::GlobalValue::NotThreadLocal, AS);
-    GV->setAlignment(Align.getAsAlign());
-    GV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-    CacheEntry = GV;
-  } else if (CacheEntry->getAlignment() < uint64_t(Align.getQuantity())) {
+  
+  if (!CacheEntry || CacheEntry->getInitializer() != Constant) 
+  {
+    std::string Name = [&D, &FunctionName, this] () 
+    {
+      if (D.hasGlobalStorage())
+        return getMangledName(&D).str() + ".const";
+      else if (const DeclContext *DC = D.getParentFunctionOrMethod())
+        return ("__const." + FunctionName(DC) + "." + D.getName()).str();
+      else
+        llvm_unreachable("local variable has no parent function or method");
+    }();
+      
+    CacheEntry = createNamedGlobal(*this, Name, Constant, Align);
+  } 
+  else if (CacheEntry->getAlignment() < uint64_t(Align.getQuantity())) 
+  {
     CacheEntry->setAlignment(Align.getAsAlign());
   }
 
