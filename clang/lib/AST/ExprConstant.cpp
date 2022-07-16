@@ -36,7 +36,7 @@
 #include "Interp/Frame.h"
 #include "Interp/State.h"
 #include "clang/AST/APValue.h"
-#include "clang/AST/APValueWithHeap.h"
+#include "clang/AST/APValueLValue.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/ASTDiagnostic.h"
 #include "clang/AST/ASTLambda.h"
@@ -70,13 +70,6 @@ using llvm::APSInt;
 using llvm::APFloat;
 using llvm::FixedPointSemantics;
 using llvm::Optional;
-
-clang::DynAlloc::Kind DynAlloc::getKind() const {
-  if (auto *NE = dyn_cast<CXXNewExpr>(AllocExpr))
-    return NE->isArray() ? ArrayNew : New;
-  assert(isa<CallExpr>(AllocExpr));
-  return StdAllocator;
-}
 
 namespace {
   struct LValue;
@@ -752,7 +745,39 @@ template<> struct DenseMapInfo<ObjectUnderConstruction> {
 }
 
 namespace {
+  
+  struct DynAlloc {
+    /// The value of this heap-allocated object.
+    APValue Value;
+    /// The allocating expression; used for diagnostics. Either a CXXNewExpr
+    /// or a CallExpr (the latter is for direct calls to operator new inside
+    /// std::allocator<T>::allocate).
+    const Expr *AllocExpr = nullptr;
 
+    enum Kind {
+      New,
+      ArrayNew,
+      StdAllocator
+    };
+
+    /// Get the kind of the allocation. This must match between allocation
+    /// and deallocation.
+    // defined in ExprConstant.cpp
+    Kind getKind() const {
+      if (auto *NE = dyn_cast<CXXNewExpr>(AllocExpr))
+        return NE->isArray() ? ArrayNew : New;
+      assert(isa<CallExpr>(AllocExpr));
+      return StdAllocator;
+    }
+  };
+
+  struct DynAllocOrder {
+    bool operator()(DynamicAllocLValue L, DynamicAllocLValue R) const {
+      return L.getIndex() < R.getIndex();
+    }
+  };
+
+  using HeapAllocMap = std::map<DynamicAllocLValue, DynAlloc, DynAllocOrder>;
   /// EvalInfo - This is a private struct used by the evaluator to capture
   /// information about a subexpression as it is folded.  It retains information
   /// about the AST context, but also maintains information about the folded
@@ -770,7 +795,12 @@ namespace {
   class EvalInfo : public interp::State {
   public:
     ASTContext &Ctx;
-
+    
+    /// the map for permanent constexpr allocations
+    /// FIXME : we only need this at the end of the evaluation, so it should be 
+    /// elsewhere
+    llvm::DenseMap<unsigned, APValue*> ExtendedAllocMap; 
+    
     /// EvalStatus - Contains information about the evaluation.
     Expr::EvalStatus &EvalStatus;
 
@@ -1026,12 +1056,14 @@ namespace {
     // deep-const 
     // called when declaring a constexpr variable containing heap allocated subobjects
     auto tryReleaseHeapAlloc(DynamicAllocLValue DA) -> 
-      Optional<decltype(HeapAllocs.extract(HeapAllocs.find(DA)))>
+      Optional<APValue>
     {
       auto It = HeapAllocs.find(DA);
       if (It == HeapAllocs.end())
         return {};
-      return HeapAllocs.extract(It);
+      APValue res = std::move(It->second.Value);
+      HeapAllocs.erase(It);
+      return res;
     }
 
     /// Get the allocated storage for the given parameter of the given call.
@@ -2104,28 +2136,23 @@ using CheckedTemporaries =
 
 static bool CheckEvaluationResult(CheckEvaluationResultKind CERK,
                                   EvalInfo &Info, SourceLocation DiagLoc,
-                                  QualType Type, const APValue &Value,
+                                  QualType Type, APValue &Value,
                                   ConstantExprKind Kind,
                                   SourceLocation SubobjectLoc,
-                                  CheckedTemporaries &CheckedTemps, 
-                                  HeapAllocMap* allocs = nullptr);
-
-// this save the heap allocations pointed to any subobjects 
-// of the result of a constant evaluation
-using SavedHeapAllocs = HeapAllocMap;
+                                  CheckedTemporaries &CheckedTemps);
 
 /// Check that this reference or pointer core constant expression is a valid
 /// value for an address or reference constant expression. Return true if we
 /// can fold this expression, whether or not it's a constant expression.
 static bool CheckLValueConstantExpression(EvalInfo &Info, SourceLocation Loc,
-                                          QualType Type, const LValue &LVal,
+                                          QualType Type, LValue &LVal,
                                           ConstantExprKind Kind,
                                           CheckedTemporaries &CheckedTemps, 
-                                          SavedHeapAllocs* allocs = nullptr) 
+                                          APValue& V)
 {
   bool IsReferenceType = Type->isReferenceType();
 
-  APValue::LValueBase Base = LVal.getLValueBase();
+  APValue::LValueBase& Base = LVal.Base;
   const SubobjectDesignator &Designator = LVal.getLValueDesignator();
 
   const Expr *BaseE = Base.dyn_cast<const Expr *>();
@@ -2203,29 +2230,44 @@ static bool CheckLValueConstantExpression(EvalInfo &Info, SourceLocation Loc,
   if (auto AllocHandle = Base.dyn_cast<DynamicAllocLValue>()) 
   {
     NoteLValueLocation(Info, Base);
-    // we're not allowing saving dynamic allocations in this context
-    if (not allocs)
-    {
-      Info.FFDiag(Loc, diag::note_constexpr_dynamic_alloc)
-        << IsReferenceType << !Designator.Entries.empty();
-      return false;
-    }
     
-    // try to move the allocation from the heap-allocation map to SavedAllocs
-    auto Node = Info.tryReleaseHeapAlloc(AllocHandle);
-    if (not Node) 
+    // we have a pointer to a permanently allocated object, nothing to do
+    if (AllocHandle.isPointer())
       return true;
     
-    // how to access value field of map node handle??
-    // just perform an extra lookup for now...
-    allocs->insert(std::move(*Node));
-    APValue& value = allocs->find(AllocHandle)->second.Value;
+    auto& map = Info.ExtendedAllocMap;
+    auto it = map.find(AllocHandle.getIndex());
     
-    auto AllocType = Base.getDynamicAllocType();
-    // process the heap-allocated values
-    return CheckEvaluationResult(CheckEvaluationResultKind::ConstantExpression, 
-							     Info, Loc, AllocType, 
-							     value, Kind, SourceLocation(), CheckedTemps, allocs);
+    APValue* AV;
+    
+    bool res = true;
+    
+    // the allocation wasn't extended yet
+    if (it == map.end())
+    {
+      auto Node = Info.tryReleaseHeapAlloc(AllocHandle);
+      // if the allocated value was not found here, then it was deleted
+      if (not Node)
+        return false;
+      
+      AV = new (Info.Ctx) APValue ( std::move(*Node) );
+      map.try_emplace( AllocHandle.getIndex(), AV );
+      
+      auto AllocType = Base.getDynamicAllocType();
+      
+      res = CheckEvaluationResult(CheckEvaluationResultKind::ConstantExpression, 
+							      Info, Loc, AllocType, 
+							      *AV, Kind, SourceLocation(), CheckedTemps);
+    }
+    else
+    {
+      AV = it->second;
+    }
+    
+    // replace the DynamicAllocLValue with a pointer to the permanent allocation
+    V.getLValueBase().replaceWith(AV);
+    auto ZZZ = V.getLValueBase().dyn_cast<DynamicAllocLValue>().getPointer();
+    return res;
   }
 
   if (BaseVD) {
@@ -2366,11 +2408,10 @@ static bool CheckLiteralType(EvalInfo &Info, const Expr *E,
 
 static bool CheckEvaluationResult(CheckEvaluationResultKind CERK,
                                   EvalInfo &Info, SourceLocation DiagLoc,
-                                  QualType Type, const APValue &Value,
+                                  QualType Type, APValue &Value,
                                   ConstantExprKind Kind,
                                   SourceLocation SubobjectLoc,
-                                  CheckedTemporaries &CheckedTemps, 
-                                  HeapAllocMap* allocs)
+                                  CheckedTemporaries &CheckedTemps)
 {
   if (!Value.hasValue()) {
     Info.FFDiag(DiagLoc, diag::note_constexpr_uninitialized)
@@ -2393,20 +2434,20 @@ static bool CheckEvaluationResult(CheckEvaluationResultKind CERK,
     for (unsigned I = 0, N = Value.getArrayInitializedElts(); I != N; ++I) {
       if (!CheckEvaluationResult(CERK, Info, DiagLoc, EltTy,
                                  Value.getArrayInitializedElt(I), Kind,
-                                 SubobjectLoc, CheckedTemps, allocs))
+                                 SubobjectLoc, CheckedTemps))
         return false;
     }
     if (!Value.hasArrayFiller())
       return true;
     return CheckEvaluationResult(CERK, Info, DiagLoc, EltTy,
                                  Value.getArrayFiller(), Kind, SubobjectLoc,
-                                 CheckedTemps, allocs);
+                                 CheckedTemps);
   }
   if (Value.isUnion() && Value.getUnionField()) {
     return CheckEvaluationResult(
         CERK, Info, DiagLoc, Value.getUnionField()->getType(),
         Value.getUnionValue(), Kind, Value.getUnionField()->getLocation(),
-        CheckedTemps, allocs);
+        CheckedTemps);
   }
   if (Value.isStruct()) {
     RecordDecl *RD = Type->castAs<RecordType>()->getDecl();
@@ -2415,7 +2456,7 @@ static bool CheckEvaluationResult(CheckEvaluationResultKind CERK,
       for (const CXXBaseSpecifier &BS : CD->bases()) {
         if (!CheckEvaluationResult(CERK, Info, DiagLoc, BS.getType(),
                                    Value.getStructBase(BaseIndex), Kind,
-                                   BS.getBeginLoc(), CheckedTemps, allocs))
+                                   BS.getBeginLoc(), CheckedTemps))
           return false;
         ++BaseIndex;
       }
@@ -2426,7 +2467,7 @@ static bool CheckEvaluationResult(CheckEvaluationResultKind CERK,
 
       if (!CheckEvaluationResult(CERK, Info, DiagLoc, I->getType(),
                                  Value.getStructField(I->getFieldIndex()),
-                                 Kind, I->getLocation(), CheckedTemps, allocs))
+                                 Kind, I->getLocation(), CheckedTemps))
         return false;
     }
   }
@@ -2436,7 +2477,7 @@ static bool CheckEvaluationResult(CheckEvaluationResultKind CERK,
     LValue LVal;
     LVal.setFrom(Info.Ctx, Value);
     return CheckLValueConstantExpression(Info, DiagLoc, Type, LVal, Kind,
-                                         CheckedTemps, allocs);
+                                         CheckedTemps, Value);
   }
 
   if (Value.isMemberPointer() &&
@@ -2451,9 +2492,8 @@ static bool CheckEvaluationResult(CheckEvaluationResultKind CERK,
 /// constant expression. If not, report an appropriate diagnostic. Does not
 /// check that the expression is of literal type.
 static bool CheckConstantExpression(EvalInfo &Info, SourceLocation DiagLoc,
-                                    QualType Type, const APValue &Value,
-                                    ConstantExprKind Kind, 
-                                    HeapAllocMap* allocs = nullptr) 
+                                    QualType Type, APValue& Value,
+                                    ConstantExprKind Kind) 
 {
   // Nothing to check for a constant expression of type 'cv void'.
   if (Type->isVoidType())
@@ -2462,13 +2502,13 @@ static bool CheckConstantExpression(EvalInfo &Info, SourceLocation DiagLoc,
   CheckedTemporaries CheckedTemps;
   return CheckEvaluationResult(CheckEvaluationResultKind::ConstantExpression,
                                Info, DiagLoc, Type, Value, Kind,
-                               SourceLocation(), CheckedTemps, allocs);
+                               SourceLocation(), CheckedTemps);
 }
 
 /// Check that this evaluated value is fully-initialized and can be loaded by
 /// an lvalue-to-rvalue conversion.
 static bool CheckFullyInitialized(EvalInfo &Info, SourceLocation DiagLoc,
-                                  QualType Type, const APValue &Value) {
+                                  QualType Type, APValue &Value) {
   CheckedTemporaries CheckedTemps;
   return CheckEvaluationResult(
       CheckEvaluationResultKind::FullyInitialized, Info, DiagLoc, Type, Value,
@@ -2536,7 +2576,6 @@ static bool HandleConversionToBool(const APValue &Val, bool &Result) {
   case APValue::Struct:
   case APValue::Union:
   case APValue::AddrLabelDiff:
-  case APValue::ValueWithHeap:
     return false;
   }
 
@@ -3649,10 +3688,6 @@ findSubobject(EvalInfo &Info, const Expr *E, const CompleteObject &Obj,
   }
 
   APValue *O = Obj.Value;
-  
-  // unwrap the value if it encapsulates heap allocations
-  if (O->getKind() == APValue::ValueWithHeap)
-    O = &O->getValueWithHeap().value();
  
   QualType ObjType = Obj.Type;
   const FieldDecl *LastField = nullptr;
@@ -4157,14 +4192,24 @@ static CompleteObject findCompleteObject(EvalInfo &Info, const Expr *E,
 
     if (!evaluateVarDeclInit(Info, E, VD, Frame, LVal.getLValueVersion(), BaseVal))
       return CompleteObject();
-  } else if (DynamicAllocLValue DA = LVal.Base.dyn_cast<DynamicAllocLValue>()) {
-    Optional<DynAlloc*> Alloc = Info.lookupDynamicAlloc(DA);
-    if (!Alloc) {
-      Info.FFDiag(E, diag::note_constexpr_access_deleted_object) << AK;
-      return CompleteObject();
+  } else if (DynamicAllocLValue DA = LVal.Base.dyn_cast<DynamicAllocLValue>()) 
+  {
+    if (DA.isPointer())
+    {
+      auto P = DA.getPointer();
+      return CompleteObject(LVal.Base, P, LVal.Base.getDynamicAllocType());
     }
-    return CompleteObject(LVal.Base, &(*Alloc)->Value,
-                          LVal.Base.getDynamicAllocType());
+    else
+    {
+      Optional<DynAlloc*> Alloc = Info.lookupDynamicAlloc(DA);
+      if (!Alloc) 
+      {
+        Info.FFDiag(E, diag::note_constexpr_access_deleted_object) << AK;
+        return CompleteObject();
+      }
+      return CompleteObject(LVal.Base, &(*Alloc)->Value,
+                            LVal.Base.getDynamicAllocType());
+    }
   } else {
     const Expr *Base = LVal.Base.dyn_cast<const Expr*>();
 
@@ -6935,7 +6980,6 @@ class APValueToBufferConverter {
     case APValue::FixedPoint:
       // FIXME: We should support these.
     
-    case APValue::ValueWithHeap:
     case APValue::Union:
     case APValue::MemberPointer:
     case APValue::AddrLabelDiff: {
@@ -15073,7 +15117,7 @@ bool Expr::EvaluateAsLValue(EvalResult &Result, const ASTContext &Ctx,
       Result.HasSideEffects ||
       !CheckLValueConstantExpression(Info, getExprLoc(),
                                      Ctx.getLValueReferenceType(getType()), LV,
-                                     ConstantExprKind::Normal, CheckedTemps))
+                                     ConstantExprKind::Normal, CheckedTemps, Result.Val))
     return false;
 
   LV.moveInto(Result.Val);
@@ -15204,13 +15248,9 @@ bool Expr::EvaluateAsInitializer(APValue &Value, const ASTContext &Ctx,
   HeapAllocMap allocMap;
   
   if (!(CheckConstantExpression(Info, DeclLoc, DeclTy, Value,
-                                  ConstantExprKind::Normal, &allocMap)
+                                  ConstantExprKind::Normal)
         && CheckMemoryLeaks(Info)))
     return false;
-
-  // if we have some dynamically allocated chunks to save, fold them in another value
-  if (not allocMap.empty())
-    Value = APValue( APValueWithHeap(std::move(Value), std::move(allocMap)) );
   
   return true;
 }

@@ -6,6 +6,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang/AST/APValueLValue.h"
+
 #include "Pointer.h"
 #include "Function.h"
 #include "InterpBlock.h"

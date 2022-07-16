@@ -10,7 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/AST/APValueWithHeap.h"
+#include "clang/AST/APValueLValue.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/CXXInheritance.h"
@@ -1882,10 +1882,6 @@ void MicrosoftCXXNameMangler::mangleTemplateArgValue(QualType T,
     return;
   }
   
-  case APValue::ValueWithHeap: 
-    assert(false && "this shouldn't be a template argument");
-    break;
-
   case APValue::AddrLabelDiff:
   case APValue::FixedPoint:
     break;

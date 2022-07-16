@@ -16,6 +16,7 @@
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/ASTDiagnostic.h"
 #include "clang/AST/ASTStructuralEquivalence.h"
+#include "clang/AST/APValueLValue.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclAccessPair.h"
@@ -9631,9 +9632,6 @@ ASTNodeImporter::ImportAPValue(const APValue &FromValue) {
   case APValue::ComplexInt:
   case APValue::ComplexFloat:
     Result = FromValue;
-    break;
-  case APValue::ValueWithHeap:
-    assert(false && "todo");
     break;
   case APValue::Vector: {
     Result.MakeVector();

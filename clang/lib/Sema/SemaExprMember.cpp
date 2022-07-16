@@ -1799,22 +1799,26 @@ void Sema::CheckMemberAccessOfNoDeref(const MemberExpr *E) {
 static QualType makeDeepConstType(QualType qualTy, ASTContext& ctx)
 {
   const Type* ty = qualTy.getTypePtr();
-  if (auto p = dyn_cast<PointerType>(ty))
+  switch(qualTy->getTypeClass())
   {
-    auto r = makeDeepConstType(p->getPointeeType(), ctx);
-    return ctx.getPointerType(r).withConst();
+    case Type::Pointer:
+    {
+      auto r = makeDeepConstType(ty->getPointeeType(), ctx);
+      return ctx.getPointerType(r).withConst();
+    }
+    case Type::LValueReference:
+	{
+      auto r = makeDeepConstType(ty->getPointeeType(), ctx);
+      return ctx.getLValueReferenceType(r).withConst();
+    }
+    case Type::RValueReference:
+    {
+      auto r = makeDeepConstType(ty->getPointeeType(), ctx);
+      return ctx.getRValueReferenceType(r).withConst();
+    }
+    default : 
+      return qualTy.withConst();
   }
-  if (auto p = dyn_cast<LValueReferenceType>(ty))
-  {
-    auto r = makeDeepConstType(p->getPointeeType(), ctx);
-    return ctx.getLValueReferenceType(r).withConst();
-  }
-  if (auto p = dyn_cast<RValueReferenceType>(ty))
-  {
-    auto r = makeDeepConstType(p->getPointeeType(), ctx);
-    return ctx.getRValueReferenceType(r).withConst();
-  }
-  return qualTy.withConst();
 }
 
 ExprResult
@@ -1878,8 +1882,6 @@ Sema::BuildFieldReferenceExpr(Expr *BaseExpr, bool IsArrow,
   if (BaseType.isConstQualified()) 
     if (auto RD = BaseType->getAsCXXRecordDecl(); RD && RD->isDeclaredDeepConst())
     {
-      auto T = makeDeepConstType(MemberType, getASTContext());
-      llvm::outs() << "changed " << MemberType.getAsString() << "to " << T.getAsString() << "\n";
       MemberType = makeDeepConstType(MemberType, getASTContext());
     }
 

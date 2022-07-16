@@ -10,6 +10,7 @@
 
 #include "TreeTransform.h"
 #include "clang/AST/ASTConsumer.h"
+#include "clang/AST/APValueLValue.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclFriend.h"

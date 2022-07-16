@@ -25,7 +25,7 @@ class ConstantEmitter {
 public:
   CodeGenModule &CGM;
   CodeGenFunction *const CGF;
-  llvm::DenseMap<unsigned, llvm::GlobalVariable*> AllocMap;
+  llvm::DenseMap<const APValue*, llvm::GlobalVariable*> AllocMap;
   
 private:
   bool Abstract = false;

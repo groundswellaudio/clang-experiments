@@ -14,7 +14,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/AST/APValueWithHeap.h"
+#include "clang/AST/APValueLValue.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
@@ -5482,7 +5482,6 @@ static bool isZeroInitialized(QualType T, const APValue &V) {
   case APValue::None:
   case APValue::Indeterminate:
   case APValue::AddrLabelDiff:
-  case APValue::ValueWithHeap:
     return false;
   
   case APValue::Struct: {
@@ -5640,13 +5639,6 @@ void CXXNameMangler::mangleValueInTemplateArg(QualType T, const APValue &V,
     Out << 'E';
     break;
   
-  case APValue::ValueWithHeap:
-    // FIXME : get the type correct here
-    mangleValueInTemplateArg(T, V.getValueWithHeap().value(), false);
-    for (auto& H : V.getValueWithHeap().heap())
-      mangleValueInTemplateArg(T, H.second.Value, false);
-    break;
-    
   case APValue::AddrLabelDiff:
     llvm_unreachable("unexpected value kind in template argument");
 

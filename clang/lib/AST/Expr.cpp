@@ -12,6 +12,7 @@
 
 #include "clang/AST/Expr.h"
 #include "clang/AST/APValue.h"
+#include "clang/AST/APValueLValue.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/ComputeDependence.h"
