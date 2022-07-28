@@ -1879,12 +1879,13 @@ Sema::BuildFieldReferenceExpr(Expr *BaseExpr, bool IsArrow,
           Context.getAttributedType(attr::NoDeref, MemberType, MemberType);
   }
   
-  if (BaseType.isConstQualified()) 
-    if (auto RD = BaseType->getAsCXXRecordDecl(); RD && RD->isDeclaredDeepConst())
-    {
+  // deep immutability
+  if (getLangOpts().CPlusPlus20 && BaseType.isConstQualified())
+  {
+    CXXRecordDecl* RD = BaseType->getAsCXXRecordDecl();
+    if (RD->isDeclaredDeepConst())
       MemberType = makeDeepConstType(MemberType, getASTContext());
-    }
-
+  }
 
   auto *CurMethod = dyn_cast<CXXMethodDecl>(CurContext);
   if (!(CurMethod && CurMethod->isDefaulted()))

@@ -2734,6 +2734,10 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
   // The instantiation is visible here, even if it was first declared in an
   // unimported module.
   Instantiation->setVisibleDespiteOwningModule();
+  
+  // Propagate deep_const
+  if (Pattern->isDeclaredDeepConst())
+    Instantiation->setDeclaredDeepConst(true);
 
   // FIXME: This loses the as-written tag kind for an explicit instantiation.
   Instantiation->setTagKind(Pattern->getTagKind());
